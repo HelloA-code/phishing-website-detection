@@ -324,6 +324,58 @@
         .flag-card .flag-icon { font-size: 1.1rem; }
         .flag-card .flag-text { flex: 1; font-size: 0.9rem; }
 
+        /* ── Charts section ── */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        .chart-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 14px;
+            padding: 16px;
+            text-align: center;
+            transition: all 0.3s ease;
+            overflow: hidden;
+        }
+        .chart-card:hover {
+            border-color: #388bfd;
+            box-shadow: 0 8px 32px rgba(56,139,253,0.08);
+        }
+        .chart-card.full-width {
+            grid-column: 1 / -1;
+        }
+        .chart-card img {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+        }
+        .chart-card .chart-title {
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 10px;
+        }
+        .charts-loading {
+            text-align: center;
+            padding: 48px 20px;
+            color: #8b949e;
+        }
+        .charts-loading .spinner {
+            display: inline-block;
+            width: 28px;
+            height: 28px;
+            border: 3px solid #30363d;
+            border-top-color: #388bfd;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            margin-bottom: 12px;
+        }
+
         /* ── History Table ── */
         .history-table {
             width: 100%;
@@ -404,6 +456,7 @@
             .stats-row { grid-template-columns: repeat(2, 1fr); }
             .features-grid { grid-template-columns: repeat(2, 1fr); }
             .model-grid { grid-template-columns: 1fr; }
+            .charts-grid { grid-template-columns: 1fr; }
             .input-wrapper { flex-direction: column; }
             .header h1 { font-size: 1.6rem; }
             .verdict-title { font-size: 1.5rem; }
@@ -500,6 +553,16 @@
             <!-- Explanation -->
             <div class="section-title">💡 Why This Decision</div>
             <div id="flags-container"></div>
+
+            <!-- Charts (Python-generated) -->
+            <div class="section-title">📊 Analysis Charts <span class="badge badge-info">Python-Generated</span></div>
+            <div id="charts-container">
+                <div class="charts-loading" id="charts-loading">
+                    <div class="spinner"></div>
+                    <div>Generating charts with Python (matplotlib)…</div>
+                </div>
+                <div class="charts-grid" id="charts-grid" style="display:none;"></div>
+            </div>
         </div>
 
         <!-- ═══════════ HISTORY ═══════════ -->
@@ -602,6 +665,9 @@
                 addToHistory(data);
                 renderHistory();
 
+                // Fetch charts asynchronously (don't block results)
+                loadCharts(data);
+
             } catch (e) {
                 showError('❌ Failed to connect to the analysis server. Please try again.');
                 console.error(e);
@@ -615,6 +681,59 @@
             const toast = document.getElementById('error-toast');
             toast.textContent = msg;
             toast.classList.add('visible');
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // LOAD CHARTS FROM PYTHON API
+        // ─────────────────────────────────────────────────────────────────
+        async function loadCharts(data) {
+            const loading = document.getElementById('charts-loading');
+            const grid = document.getElementById('charts-grid');
+
+            loading.style.display = 'block';
+            grid.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/charts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        features: data.features,
+                        phish_prob: data.phish_prob,
+                        confidence: data.confidence,
+                    }),
+                });
+                const charts = await res.json();
+
+                if (charts.error) {
+                    loading.innerHTML = '<div style="color:#f85149;">❌ Chart generation failed: ' + charts.error + '</div>';
+                    return;
+                }
+
+                const chartEntries = [
+                    { key: 'probability_gauge',    title: 'Phishing Probability Breakdown', full: true },
+                    { key: 'feature_comparison',   title: 'Feature Comparison: Your URL vs Dataset', full: true },
+                    { key: 'dataset_distribution', title: 'Dataset Label Distribution', full: false },
+                    { key: 'confusion_matrix',     title: 'Model Confusion Matrix', full: false },
+                    { key: 'url_length_histogram', title: 'URL Length Distribution', full: true },
+                ];
+
+                grid.innerHTML = chartEntries
+                    .filter(c => charts[c.key])
+                    .map(c => `
+                        <div class="chart-card ${c.full ? 'full-width' : ''} fade-in">
+                            <div class="chart-title">${c.title}</div>
+                            <img src="data:image/png;base64,${charts[c.key]}" alt="${c.title}">
+                        </div>
+                    `).join('');
+
+                loading.style.display = 'none';
+                grid.style.display = 'grid';
+
+            } catch (e) {
+                loading.innerHTML = '<div style="color:#f85149;">❌ Failed to load charts. Please try again.</div>';
+                console.error('Charts error:', e);
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────
