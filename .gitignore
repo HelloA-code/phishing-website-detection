@@ -1,0 +1,19 @@
+# Large dataset (57MB) — use sample_dataset.csv for deployment
+Phishing_Website_Detection.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
