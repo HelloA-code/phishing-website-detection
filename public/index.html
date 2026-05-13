@@ -555,7 +555,7 @@
             <div id="flags-container"></div>
 
             <!-- Charts (Python-generated) -->
-            <div class="section-title">📊 Analysis Charts <span class="badge badge-info">Python-Generated</span></div>
+            <div class="section-title">📊 Live Analysis Charts <span class="badge badge-info">Dynamic</span></div>
             <div id="charts-container">
                 <div class="charts-loading" id="charts-loading">
                     <div class="spinner"></div>
@@ -699,8 +699,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         features: data.features,
+                        flags: data.flags,
                         phish_prob: data.phish_prob,
-                        confidence: data.confidence,
                     }),
                 });
                 const charts = await res.json();
@@ -711,11 +711,9 @@
                 }
 
                 const chartEntries = [
-                    { key: 'probability_gauge',    title: 'Phishing Probability Breakdown', full: true },
-                    { key: 'feature_comparison',   title: 'Feature Comparison: Your URL vs Dataset', full: true },
-                    { key: 'dataset_distribution', title: 'Dataset Label Distribution', full: false },
-                    { key: 'confusion_matrix',     title: 'Model Confusion Matrix', full: false },
-                    { key: 'url_length_histogram', title: 'URL Length Distribution', full: true },
+                    { key: 'probability_gauge',  title: 'Phishing Probability Breakdown', full: true },
+                    { key: 'feature_comparison', title: 'Feature Comparison: Your URL vs Dataset', full: true },
+                    { key: 'risk_donut',         title: 'Risk Severity Breakdown', full: false },
                 ];
 
                 grid.innerHTML = chartEntries

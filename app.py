@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib
-import seaborn as sns
+
 import streamlit as st
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -155,17 +155,43 @@ st.markdown(DARK_CSS, unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-FEATURES = ["URLLength", "DomainLength", "SpecialCharRatioURL",
-            "IsHTTPS", "NoOfSubDomain"]
+FEATURES = [
+    "URLLength", "DomainLength", "IsDomainIP", "TLDLength",
+    "NoOfSubDomain", "NoOfLettersInURL", "LetterRatioInURL",
+    "NoOfDegitsInURL", "DegitRatioInURL",
+    "NoOfEqualsInURL", "NoOfQMarkInURL", "NoOfAmpersandInURL",
+    "NoOfOtherSpecialCharsInURL", "SpecialCharRatioURL",
+    "IsHTTPS", "CharContinuationRate", "URLCharProb",
+]
 
 SUSPICIOUS_KEYWORDS = [
     "login", "verify", "secure", "bank", "account",
     "update", "confirm", "paypal", "signin", "password",
-    "validate", "authenticate", "billing", "suspend"
+    "validate", "authenticate", "billing", "suspend",
+    "alert", "unlock", "expire", "urgent", "wallet",
+]
+
+RISKY_TLDS = [
+    "tk", "ml", "ga", "cf", "gq", "buzz", "xyz", "top",
+    "club", "work", "info", "online", "site", "icu", "cam",
+]
+
+BRAND_DOMAINS = {
+    "paypal": "paypal.com", "apple": "apple.com",
+    "google": "google.com", "facebook": "facebook.com",
+    "microsoft": "microsoft.com", "amazon": "amazon.com",
+    "netflix": "netflix.com", "instagram": "instagram.com",
+    "twitter": "twitter.com", "linkedin": "linkedin.com",
+    "whatsapp": "whatsapp.com", "dropbox": "dropbox.com",
+}
+
+URL_SHORTENERS = [
+    "bit.ly", "tinyurl.com", "goo.gl", "t.co", "ow.ly",
+    "is.gd", "buff.ly", "adf.ly", "cutt.ly", "rb.gy",
 ]
 
 DATASET_PATH = "Phishing_Website_Detection.csv"
-URL_LONG_THRESHOLD = 75
+URL_LONG_THRESHOLD = 54
 HISTORY_MAX = 10
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,7 +213,7 @@ if "df" not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_and_train(path: str):
-    """Load dataset, train LogisticRegression, return model + metrics."""
+    """Load dataset, train RandomForest, return model + metrics."""
     df = pd.read_csv(path)
     required = set(FEATURES + ["label"])
     missing = required - set(df.columns)
@@ -205,7 +231,10 @@ def load_and_train(path: str):
     X_train_sc = scaler.fit_transform(X_train)
     X_test_sc  = scaler.transform(X_test)
 
-    model = LogisticRegression(max_iter=1000, random_state=42)
+    model = RandomForestClassifier(
+        n_estimators=200, max_depth=15, min_samples_split=5,
+        random_state=42, n_jobs=-1,
+    )
     model.fit(X_train_sc, y_train)
 
     y_pred = model.predict(X_test_sc)
@@ -227,37 +256,84 @@ def load_and_train(path: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # FEATURE EXTRACTION
 # ─────────────────────────────────────────────────────────────────────────────
+def _char_continuation_rate(s: str) -> float:
+    """Fraction of consecutive same-type character pairs."""
+    if len(s) <= 1:
+        return 0.0
+    def ctype(c):
+        if c.isalpha(): return 0
+        if c.isdigit(): return 1
+        return 2
+    pairs = sum(1 for i in range(1, len(s)) if ctype(s[i]) == ctype(s[i - 1]))
+    return round(pairs / (len(s) - 1), 6)
+
+
+def _url_char_prob(s: str) -> float:
+    """Average character frequency-based probability."""
+    if not s:
+        return 0.0
+    from collections import Counter
+    freq = Counter(s)
+    total = len(s)
+    return round(sum(freq[c] / total for c in s) / total, 9)
+
+
+def _get_tld(domain: str) -> str:
+    """Extract TLD from domain."""
+    parts = domain.rsplit(".", 1)
+    return parts[-1] if len(parts) > 1 else ""
+
+
 def extract_features(url: str) -> dict:
-    """Extract all features from a raw URL string."""
+    """Extract all 17 ML features + extras for rule-based logic."""
     url = url.strip()
-    parsed = urlparse(url if "://" in url else "http://" + url)
+    full_url = url if "://" in url else "http://" + url
+    parsed = urlparse(full_url)
 
     domain     = parsed.netloc or url.split("/")[0]
     url_len    = len(url)
     domain_len = len(domain)
+    tld        = _get_tld(domain)
 
-    # Special character ratio (special = not alphanumeric / dot / dash)
-    special_chars = re.findall(r"[^a-zA-Z0-9.\-]", url)
-    spec_ratio    = len(special_chars) / url_len if url_len else 0.0
+    # Character counts
+    n_letters = sum(1 for c in url if c.isalpha())
+    n_digits  = sum(1 for c in url if c.isdigit())
+    n_equals  = url.count("=")
+    n_qmark   = url.count("?")
+    n_amp     = url.count("&")
+    other_special = len(re.findall(r"[^a-zA-Z0-9.\-]", url))
+    spec_ratio = other_special / url_len if url_len else 0.0
 
-    # HTTPS
-    is_https = 1 if parsed.scheme == "https" else 0
-
-    # Subdomain count (dots in domain minus 1, min 0)
+    is_https     = 1 if parsed.scheme == "https" else 0
+    is_ip        = 1 if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", domain) else 0
     dot_count    = domain.count(".")
     n_subdomains = max(dot_count - 1, 0)
 
     return {
-        "URLLength":          url_len,
-        "DomainLength":       domain_len,
-        "SpecialCharRatioURL": round(spec_ratio, 4),
-        "IsHTTPS":            is_https,
-        "NoOfSubDomain":      n_subdomains,
-        # extras used for rule-based logic only
-        "_url":               url,
-        "_domain":            domain,
-        "_has_at":            "@" in url,
-        "_has_ip":            bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}", domain)),
+        # ── ML features (must match FEATURES order) ──
+        "URLLength":                url_len,
+        "DomainLength":             domain_len,
+        "IsDomainIP":               is_ip,
+        "TLDLength":                len(tld),
+        "NoOfSubDomain":            n_subdomains,
+        "NoOfLettersInURL":         n_letters,
+        "LetterRatioInURL":         round(n_letters / url_len, 4) if url_len else 0.0,
+        "NoOfDegitsInURL":          n_digits,
+        "DegitRatioInURL":          round(n_digits / url_len, 4) if url_len else 0.0,
+        "NoOfEqualsInURL":          n_equals,
+        "NoOfQMarkInURL":           n_qmark,
+        "NoOfAmpersandInURL":       n_amp,
+        "NoOfOtherSpecialCharsInURL": other_special,
+        "SpecialCharRatioURL":      round(spec_ratio, 4),
+        "IsHTTPS":                  is_https,
+        "CharContinuationRate":     _char_continuation_rate(url),
+        "URLCharProb":              _url_char_prob(url),
+        # ── extras for rule-based logic ──
+        "_url":      url,
+        "_domain":   domain,
+        "_tld":      tld,
+        "_has_at":   "@" in url,
+        "_has_ip":   is_ip == 1,
     }
 
 
@@ -267,30 +343,57 @@ def extract_features(url: str) -> dict:
 def rule_based_flags(feats: dict) -> list[dict]:
     """Return a list of triggered rule dicts {rule, severity, label}."""
     flags = []
+    url_lower = feats["_url"].lower()
+    domain    = feats["_domain"].lower()
+    tld       = feats.get("_tld", "").lower()
 
     def add(rule, sev, lbl):
         flags.append({"rule": rule, "severity": sev, "label": lbl})
 
+    # ── HIGH severity ──
     if feats["_has_at"]:
         add("Contains '@' character in URL", "high", "danger")
-
+    if feats["_has_ip"]:
+        add("Domain is a raw IP address", "high", "danger")
     if feats["URLLength"] > URL_LONG_THRESHOLD:
         add(f"URL is very long ({feats['URLLength']} chars)", "high", "danger")
 
-    kw_found = [k for k in SUSPICIOUS_KEYWORDS if k in feats["_url"].lower()]
-    for kw in kw_found:
+    # Brand impersonation
+    for brand, legit_domain in BRAND_DOMAINS.items():
+        if brand in domain and legit_domain not in domain:
+            add(f"Possible brand impersonation: '{brand}'", "high", "danger")
+            break
+
+    # Punycode / IDN
+    if "xn--" in domain:
+        add("Punycode / internationalized domain (possible homograph)", "high", "danger")
+
+    # Risky TLD
+    if tld in RISKY_TLDS:
+        add(f"High-risk TLD: '.{tld}'", "high", "danger")
+
+    # URL shortener
+    for shortener in URL_SHORTENERS:
+        if shortener in domain:
+            add(f"URL shortener detected: '{shortener}'", "high", "danger")
+            break
+
+    # ── MEDIUM severity ──
+    kw_found = [k for k in SUSPICIOUS_KEYWORDS if k in url_lower]
+    for kw in kw_found[:3]:  # cap at 3
         add(f"Suspicious keyword: '{kw}'", "medium", "warn")
 
     if not feats["IsHTTPS"]:
         add("No HTTPS (unencrypted connection)", "medium", "warn")
-
     if feats["NoOfSubDomain"] >= 3:
         add(f"Excessive subdomains ({feats['NoOfSubDomain']})", "medium", "warn")
+    if domain.count("-") >= 3:
+        add(f"Many hyphens in domain ({domain.count('-')})", "medium", "warn")
+    if feats["NoOfDegitsInURL"] > 8:
+        add(f"Many digits in URL ({feats['NoOfDegitsInURL']})", "medium", "warn")
 
-    if feats["_has_ip"]:
-        add("Domain is a raw IP address", "high", "danger")
-
-    if feats["SpecialCharRatioURL"] > 0.15:
+    # ── LOW severity ──
+    if feats["SpecialCharRatioURL"] > 0.12:
         add(f"High special-char ratio ({feats['SpecialCharRatioURL']:.2%})", "low", "warn")
 
     return flags
@@ -304,30 +407,34 @@ def hybrid_predict(url: str, model, scaler) -> dict:
     feats = extract_features(url)
     flags = rule_based_flags(feats)
 
-    # ML probability
-    X = np.array([[
-        feats["URLLength"],
-        feats["DomainLength"],
-        feats["SpecialCharRatioURL"],
-        feats["IsHTTPS"],
-        feats["NoOfSubDomain"],
-    ]])
+    # ML probability — use all 17 features
+    X = np.array([[feats[f] for f in FEATURES]])
     X_sc = scaler.transform(X)
-    ml_proba   = model.predict_proba(X_sc)[0]   # [P(legit), P(phishing)]
-    ml_label   = int(model.predict(X_sc)[0])     # 0 = legit, 1 = phishing
-    ml_conf    = float(ml_proba[ml_label])
+    ml_proba = model.predict_proba(X_sc)[0]   # [P(legit), P(phishing)]
+    ml_label = int(model.predict(X_sc)[0])     # 0 = legit, 1 = phishing
+    ml_conf  = float(ml_proba[ml_label])
 
-    # Rule contribution: each high flag nudges phishing probability up
+    # Rule contribution — uncapped, aggressive weights
     high_flags   = sum(1 for f in flags if f["severity"] == "high")
     medium_flags = sum(1 for f in flags if f["severity"] == "medium")
-    rule_score   = min(high_flags * 0.15 + medium_flags * 0.08, 0.40)
+    low_flags    = sum(1 for f in flags if f["severity"] == "low")
+    rule_score   = min(high_flags * 0.30 + medium_flags * 0.15 + low_flags * 0.05, 1.0)
 
-    # Blend: 70% ML, 30% rules
-    phish_prob_raw = 0.70 * ml_proba[1] + 0.30 * rule_score
-    phish_prob     = float(np.clip(phish_prob_raw, 0.0, 1.0))
+    # Adaptive blending: more rule flags → more rule influence
+    if rule_score >= 0.60:
+        phish_prob_raw = 0.25 * ml_proba[1] + 0.75 * rule_score
+    elif rule_score >= 0.30:
+        phish_prob_raw = 0.40 * ml_proba[1] + 0.60 * rule_score
+    elif rule_score > 0:
+        phish_prob_raw = 0.55 * ml_proba[1] + 0.45 * rule_score
+    else:
+        phish_prob_raw = ml_proba[1]
 
-    final_label  = 1 if phish_prob >= 0.50 else 0
-    confidence   = phish_prob if final_label == 1 else 1.0 - phish_prob
+    # Ensure minimum phishing probability when strong rules fire
+    phish_prob = float(np.clip(max(phish_prob_raw, rule_score * 0.70), 0.0, 1.0))
+
+    final_label = 1 if phish_prob >= 0.40 else 0
+    confidence  = phish_prob if final_label == 1 else 1.0 - phish_prob
 
     return {
         "url":           url,
@@ -343,7 +450,7 @@ def hybrid_predict(url: str, model, scaler) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CHART HELPERS
+# CHART HELPERS (dynamic, per-analysis)
 # ─────────────────────────────────────────────────────────────────────────────
 DARK_BG  = "#0d1117"
 DARK_AX  = "#161b22"
@@ -351,6 +458,8 @@ CLR_GRID = "#21262d"
 CLR_TEXT = "#c9d1d9"
 CLR_PHISH = "#f85149"
 CLR_LEGIT = "#3fb950"
+CLR_ACCENT = "#388bfd"
+CLR_WARN = "#d29922"
 
 def _fig_style(fig, ax_list=None):
     fig.patch.set_facecolor(DARK_BG)
@@ -362,74 +471,109 @@ def _fig_style(fig, ax_list=None):
         ax.title.set_color(CLR_TEXT)
         for spine in ax.spines.values():
             spine.set_edgecolor(CLR_GRID)
-        ax.grid(color=CLR_GRID, linewidth=0.6, alpha=0.7)
+        ax.grid(color=CLR_GRID, linewidth=0.6, alpha=0.4)
 
 
-def chart_bar(label_counts: dict):
-    fig, ax = plt.subplots(figsize=(4, 3))
-    labels = ["Legitimate", "Phishing"]
-    values = [label_counts.get(0, 0), label_counts.get(1, 0)]
-    bars   = ax.bar(labels, values, color=[CLR_LEGIT, CLR_PHISH],
-                    edgecolor=CLR_GRID, linewidth=0.8, width=0.5)
-    for bar, val in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
-                str(val), ha="center", va="bottom", color=CLR_TEXT, fontsize=9)
-    ax.set_title("Dataset Distribution", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Count")
+def chart_probability_gauge(phish_prob: float):
+    """Horizontal gauge: legitimate vs phishing probability."""
+    fig, ax = plt.subplots(figsize=(7, 1.8))
+    legit_p = 1.0 - phish_prob
+    ax.barh(0, legit_p, height=0.6, color=CLR_LEGIT, alpha=0.85,
+            label=f"Legitimate  {legit_p:.1%}", edgecolor="none")
+    ax.barh(0, phish_prob, height=0.6, left=legit_p, color=CLR_PHISH,
+            alpha=0.85, label=f"Phishing  {phish_prob:.1%}", edgecolor="none")
+    ax.axvline(x=0.40, color=CLR_WARN, linewidth=2, linestyle="--", alpha=0.9)
+    ax.text(0.40, 0.48, "Threshold", ha="center", va="bottom",
+            color=CLR_WARN, fontsize=8, fontweight="bold")
+    ax.set_xlim(0, 1); ax.set_yticks([])
+    from matplotlib.ticker import PercentFormatter
+    ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+    ax.set_title("Phishing Probability Breakdown", fontsize=11, fontweight="bold")
+    leg = ax.legend(fontsize=8, facecolor=DARK_AX, edgecolor=CLR_GRID,
+                    loc="upper right", ncol=2)
+    for t in leg.get_texts(): t.set_color(CLR_TEXT)
     _fig_style(fig)
     plt.tight_layout()
     return fig
 
 
-def chart_histogram(df: pd.DataFrame):
-    fig, ax = plt.subplots(figsize=(4, 3))
-    phish = df[df.label == 1]["URLLength"]
-    legit = df[df.label == 0]["URLLength"]
-    ax.hist(legit,  bins=30, color=CLR_LEGIT, alpha=0.75, label="Legitimate", edgecolor=DARK_AX)
-    ax.hist(phish,  bins=30, color=CLR_PHISH, alpha=0.75, label="Phishing",   edgecolor=DARK_AX)
-    ax.set_title("URL Length Distribution", fontsize=11, fontweight="bold")
-    ax.set_xlabel("URL Length")
-    ax.set_ylabel("Frequency")
+def chart_feature_bars(feats: dict, df: pd.DataFrame):
+    """Side-by-side bars: your URL features vs dataset average."""
+    keys = ["URLLength", "DomainLength", "NoOfSubDomain",
+            "NoOfLettersInURL", "NoOfDegitsInURL"]
+    labels = ["URL Len", "Domain Len", "Subdomains", "Letters", "Digits"]
+    user_vals = [feats[k] for k in keys]
+    avg_vals  = [float(df[k].mean()) for k in keys]
+
+    x = np.arange(len(labels))
+    w = 0.35
+    fig, ax = plt.subplots(figsize=(6, 3.2))
+    ax.bar(x - w/2, user_vals, w, label="Your URL",
+           color=CLR_ACCENT, edgecolor=CLR_GRID, linewidth=0.5, alpha=0.9)
+    ax.bar(x + w/2, avg_vals, w, label="Dataset Avg",
+           color="#8b949e", edgecolor=CLR_GRID, linewidth=0.5, alpha=0.6)
+    ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=8.5)
+    ax.set_title("Feature Comparison: Your URL vs Dataset", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Value")
     leg = ax.legend(fontsize=8, facecolor=DARK_AX, edgecolor=CLR_GRID)
-    for t in leg.get_texts():
-        t.set_color(CLR_TEXT)
+    for t in leg.get_texts(): t.set_color(CLR_TEXT)
     _fig_style(fig)
     plt.tight_layout()
     return fig
 
 
-def chart_heatmap(df: pd.DataFrame):
-    cols = FEATURES + ["label"]
-    corr = df[cols].corr()
-    fig, ax = plt.subplots(figsize=(5, 4))
-    sns.heatmap(
-        corr, annot=True, fmt=".2f", ax=ax,
-        cmap=sns.diverging_palette(10, 133, as_cmap=True),
-        linewidths=0.5, linecolor=CLR_GRID,
-        annot_kws={"size": 8, "color": CLR_TEXT},
-        cbar_kws={"shrink": 0.8},
+def chart_risk_donut(flags: list):
+    """Donut chart of risk severity breakdown."""
+    high   = sum(1 for f in flags if f["severity"] == "high")
+    medium = sum(1 for f in flags if f["severity"] == "medium")
+    low    = sum(1 for f in flags if f["severity"] == "low")
+    safe   = 1 if (high + medium + low) == 0 else 0
+
+    sizes  = [v for v in [high, medium, low, safe] if v > 0]
+    labels = [l for l, v in [(f"High ({high})", high), (f"Medium ({medium})", medium),
+              (f"Low ({low})", low), ("No Issues", safe)] if v > 0]
+    colors = [c for c, v in [(CLR_PHISH, high), (CLR_WARN, medium),
+              (CLR_ACCENT, low), (CLR_LEGIT, safe)] if v > 0]
+
+    fig, ax = plt.subplots(figsize=(3.5, 3.5))
+    wedges, texts, autotexts = ax.pie(
+        sizes, labels=labels, colors=colors, autopct="%1.0f%%",
+        startangle=90, pctdistance=0.75,
+        textprops={"color": CLR_TEXT, "fontsize": 9},
+        wedgeprops={"width": 0.4, "edgecolor": DARK_BG, "linewidth": 2},
     )
-    ax.set_title("Feature Correlation Matrix", fontsize=11, fontweight="bold")
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right", fontsize=8)
-    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=8)
-    _fig_style(fig)
+    for at in autotexts:
+        at.set_fontweight("bold"); at.set_fontsize(10)
+    ax.set_title("Risk Severity Breakdown", fontsize=11,
+                 fontweight="bold", color=CLR_TEXT)
+    fig.patch.set_facecolor(DARK_BG)
     plt.tight_layout()
     return fig
 
 
-def chart_confusion(cm: np.ndarray):
-    fig, ax = plt.subplots(figsize=(3.5, 3))
-    sns.heatmap(
-        cm, annot=True, fmt="d", ax=ax,
-        cmap="Blues",
-        xticklabels=["Legitimate", "Phishing"],
-        yticklabels=["Legitimate", "Phishing"],
-        linewidths=0.5, linecolor=CLR_GRID,
-        annot_kws={"size": 12, "color": "white"},
-    )
-    ax.set_title("Confusion Matrix", fontsize=11, fontweight="bold")
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("Actual")
+def chart_history_trend(history: list):
+    """Line chart of phishing probability over scan history."""
+    if len(history) < 2:
+        return None
+    probs = [h["phish_prob"] for h in reversed(history)]
+    labels_h = [h["url"][:18] + "…" if len(h["url"]) > 18 else h["url"]
+                for h in reversed(history)]
+    x = list(range(1, len(probs) + 1))
+
+    fig, ax = plt.subplots(figsize=(7, 3))
+    colors = [CLR_PHISH if p >= 0.40 else CLR_LEGIT for p in probs]
+    ax.plot(x, probs, color=CLR_ACCENT, linewidth=2, marker="o",
+            markersize=6, markerfacecolor=CLR_ACCENT, zorder=3)
+    ax.scatter(x, probs, c=colors, s=60, zorder=4, edgecolors="white", linewidths=0.8)
+    ax.axhline(y=0.40, color=CLR_WARN, linewidth=1.5, linestyle="--", alpha=0.7)
+    ax.text(len(x), 0.42, "Threshold", ha="right", color=CLR_WARN, fontsize=8)
+    ax.fill_between(x, 0.40, 1.0, alpha=0.06, color=CLR_PHISH)
+    ax.fill_between(x, 0.0, 0.40, alpha=0.06, color=CLR_LEGIT)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels_h, rotation=35, ha="right", fontsize=7)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_ylabel("Phishing Probability")
+    ax.set_title("Scan History Trend", fontsize=11, fontweight="bold")
     _fig_style(fig)
     plt.tight_layout()
     return fig
@@ -470,9 +614,9 @@ def render_sidebar(metrics: dict):
         st.markdown(f"**Train samples:** `{metrics.get('n_train', '—')}`")
         st.markdown(f"**Test samples:**  `{metrics.get('n_test', '—')}`")
         st.markdown("---")
-        st.markdown("**Algorithm:** Logistic Regression")
+        st.markdown("**Algorithm:** Random Forest (200 trees)")
         st.markdown("**Scaler:** StandardScaler")
-        st.markdown("**Features:** 5")
+        st.markdown("**Features:** 17")
         st.markdown("**Detection:** Hybrid (ML + Rules)")
         st.markdown("---")
         rep = metrics.get("report", {})
@@ -587,13 +731,14 @@ def main():
         # ── SECTION 2 – Extracted Features ──────────────────────────────────
         section("🔬", "Extracted Features")
 
-        fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+        fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
         pairs = [
             (fc1, "URL Length",       feats["URLLength"],          "chars"),
             (fc2, "Domain Length",    feats["DomainLength"],        "chars"),
             (fc3, "Special-Char %",   f"{feats['SpecialCharRatioURL']:.2%}", ""),
             (fc4, "Subdomains",       feats["NoOfSubDomain"],       "count"),
             (fc5, "HTTPS",            "Yes" if feats["IsHTTPS"] else "No", ""),
+            (fc6, "IP Domain",        "Yes" if feats.get("IsDomainIP") else "No", ""),
         ]
         for col, lbl, val, unit in pairs:
             with col:
@@ -681,7 +826,25 @@ def main():
             )
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 5 – History
+    # SECTION 5 – Dynamic Analysis Charts (shown after each analysis)
+    # ════════════════════════════════════════════════════════════════════════
+    if result:
+        section("📊", "Live Analysis Charts")
+
+        # Row 1: probability gauge (full width)
+        st.pyplot(chart_probability_gauge(result["phish_prob"]),
+                  use_container_width=True)
+
+        # Row 2: feature comparison + risk donut
+        ch1, ch2 = st.columns([3, 2])
+        with ch1:
+            st.pyplot(chart_feature_bars(feats, st.session_state.df),
+                      use_container_width=True)
+        with ch2:
+            st.pyplot(chart_risk_donut(flags), use_container_width=True)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION 6 – History + Trend
     # ════════════════════════════════════════════════════════════════════════
     section("📋", "Recent Analysis History")
 
@@ -689,7 +852,7 @@ def main():
     if not history:
         st.markdown(
             '<div class="card" style="color:#8b949e;text-align:center;">'
-            'No URLs analysed yet.</div>',
+            'No URLs analysed yet. Enter a URL above to get started.</div>',
             unsafe_allow_html=True
         )
     else:
@@ -697,41 +860,17 @@ def main():
         hist_df.columns = ["URL", "Prediction", "Confidence"]
         st.table(hist_df)
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 6 – Analytics
-    # ════════════════════════════════════════════════════════════════════════
-    section("📊", "Dataset Analytics")
-
-    df_data = st.session_state.df
-    metrics = st.session_state.train_metrics
-
-    # Row 1: bar + histogram + confusion
-    r1c1, r1c2, r1c3 = st.columns([1, 1, 1])
-    with r1c1:
-        st.pyplot(chart_bar(metrics["label_counts"]), use_container_width=True)
-    with r1c2:
-        st.pyplot(chart_histogram(df_data), use_container_width=True)
-    with r1c3:
-        st.pyplot(
-            chart_confusion(metrics["confusion_matrix"]),
-            use_container_width=True
-        )
-
-    # Row 2: heatmap (full width)
-    st.pyplot(chart_heatmap(df_data), use_container_width=True)
-
-    # Detailed classification report
-    with st.expander("📈 Full Classification Report"):
-        rep = metrics.get("report", {})
-        if rep:
-            rep_df = pd.DataFrame(rep).T.round(3)
-            st.dataframe(rep_df, use_container_width=True)
+        # Trend chart (shows after 2+ scans)
+        trend_fig = chart_history_trend(history)
+        if trend_fig:
+            section("📈", "Scan Trend")
+            st.pyplot(trend_fig, use_container_width=True)
 
     # ── Footer ───────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown(
         '<p style="text-align:center;color:#484f58;font-size:0.8rem;">'
-        'Phishing Detector · Logistic Regression + Rule-based Hybrid · '
+        'Phishing Detector · Random Forest + Rule-based Hybrid · '
         'Built with Streamlit</p>',
         unsafe_allow_html=True
     )
